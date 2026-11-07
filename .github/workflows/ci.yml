@@ -1,0 +1,21 @@
+# ABOUTME: Runs the Python test suite and ruff on macOS for every push to main and every pull request.
+# ABOUTME: Only libopus is needed from Homebrew; the tests fake whisper-cli and the pendant.
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: mac
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: brew install opus
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest -q

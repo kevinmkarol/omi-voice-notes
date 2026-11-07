@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>omi-voice-notes.sync</string>
+  <!-- Every __INTERVAL__ s: if the pendant is in range and free, pull its ring, transcribe, free it.
+       --if-present makes a run with no pendant around exit silently. launchd never overlaps two runs.
+       schedule.sh fills in __MAC_DIR__, __UV__ and __INTERVAL__, and __EXTRA_ENV__ with any OMI_NOTES_* variables
+       set when it ran (OMI_NOTES_ARCHIVE, OMI_NOTES_WEBHOOK, OMI_NOTES_WEBHOOK_TOKEN, OMI_NOTES_MODELS, OMI_NOTES_VOCABULARY). -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__UV__</string>
+    <string>run</string>
+    <string>--directory</string>
+    <string>__MAC_DIR__</string>
+    <string>omi-sync</string>
+    <string>--if-present</string>
+    <string>--timeout</string>
+    <string>15</string>
+    <string>--quiet</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    __EXTRA_ENV__
+  </dict>
+  <key>StartInterval</key>
+  <integer>__INTERVAL__</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__MAC_DIR__/logs/omi-sync.log</string>
+  <key>StandardErrorPath</key>
+  <string>__MAC_DIR__/logs/omi-sync.log</string>
+</dict>
+</plist>

@@ -1,0 +1,328 @@
+diff --git a/omi/firmware/omi/omi.conf b/omi/firmware/omi/omi.conf
+index f06da2f..3c79dfa 100644
+--- a/omi/firmware/omi/omi.conf
++++ b/omi/firmware/omi/omi.conf
+@@ -109,7 +109,7 @@ CONFIG_BT_DIS_MODEL="Omi CV 1"
+ CONFIG_BT_DIS_MANUF="Based Hardware"
+ CONFIG_BT_DIS_FW_REV=y
+ CONFIG_BT_DIS_HW_REV=y
+-CONFIG_BT_DIS_FW_REV_STR="3.0.21"
++CONFIG_BT_DIS_FW_REV_STR="3.0.21-cw1"
+ CONFIG_BT_DIS_HW_REV_STR="5.0"
+ 
+ #
+diff --git a/omi/firmware/omi/src/lib/core/button.c b/omi/firmware/omi/src/lib/core/button.c
+index 9e6af77..31981d4 100644
+--- a/omi/firmware/omi/src/lib/core/button.c
++++ b/omi/firmware/omi/src/lib/core/button.c
+@@ -27,6 +27,8 @@
+ LOG_MODULE_REGISTER(button, CONFIG_LOG_DEFAULT_LEVEL);
+ 
+ extern bool is_off;
++extern bool recording_enabled; /* main.c; flipped by a single tap (tap-to-record) */
++void led_state_changed(void);  /* main.c; shows the new state on the LED at once */
+ 
+ static void button_ccc_config_changed_handler(const struct bt_gatt_attr *attr, uint16_t value);
+ static ssize_t button_data_read_characteristic(struct bt_conn *conn,
+@@ -76,12 +78,35 @@ void check_button_level(struct k_work *work_item);
+ 
+ K_WORK_DELAYABLE_DEFINE(button_work, check_button_level);
+ 
++/* Recording heartbeat: one short buzz every RECORDING_HEARTBEAT_S
++ * seconds while recording, so a tap that resumed recording unnoticed is noticed within
++ * half a minute. Started by toggle_recording() when recording turns on
++ * when recording resumes, stopped when muted or when the device powers off. */
++#define RECORDING_HEARTBEAT_S 30
++#define RECORDING_HEARTBEAT_MS 50
++static void recording_heartbeat(struct k_work *work);
++K_WORK_DELAYABLE_DEFINE(heartbeat_work, recording_heartbeat);
++
++static void recording_heartbeat(struct k_work *work)
++{
++    if (is_off || !recording_enabled) {
++        return; /* toggle_recording() schedules us again when recording resumes */
++    }
++#ifdef CONFIG_OMI_ENABLE_HAPTIC
++    play_haptic_milli(RECORDING_HEARTBEAT_MS);
++#endif
++    k_work_reschedule(&heartbeat_work, K_SECONDS(RECORDING_HEARTBEAT_S));
++}
++
+ #define DEFAULT_STATE 0
+ #define SINGLE_TAP 1
+ #define DOUBLE_TAP 2
+ #define LONG_TAP 3
+ #define BUTTON_PRESS 4
+ #define BUTTON_RELEASE 5
++/* Tap-to-record: sent after every single tap so clients learn the state. */
++#define RECORDING_ON 6
++#define RECORDING_OFF 7
+ 
+ // 4 is button down, 5 is button up
+ static FSM_STATE_T current_button_state = IDLE;
+@@ -146,12 +171,47 @@ static inline void notify_long_tap()
+     }
+ }
+ 
++static inline void notify_recording_state()
++{
++    final_button_state[0] = recording_enabled ? RECORDING_ON : RECORDING_OFF;
++    LOG_INF("Recording %s", recording_enabled ? "on" : "off");
++    struct bt_conn *conn = get_current_connection();
++    if (conn != NULL) {
++        bt_gatt_notify(conn, &button_service.attrs[1], &final_button_state, sizeof(final_button_state));
++    }
++}
++
++/* Short press: flip recording. One haptic pulse when muting, two when resuming.
++ * Runs on the system workqueue like turnoff_all(), so short sleeps are fine; the
++ * first pulse is ended with haptic_off() directly because the haptic driver's own
++ * off-work item shares this queue and could not run while we sleep here. */
++static void toggle_recording()
++{
++    recording_enabled = !recording_enabled;
++    mic_set_muted(!recording_enabled); /* muted = mic asleep, SD rail off */
++    led_state_changed();
++    if (recording_enabled) {
++        k_work_reschedule(&heartbeat_work, K_SECONDS(RECORDING_HEARTBEAT_S));
++    } else {
++        k_work_cancel_delayable(&heartbeat_work);
++    }
++#ifdef CONFIG_OMI_ENABLE_HAPTIC
++    play_haptic_milli(80);
++    if (recording_enabled) {
++        k_msleep(80);
++        haptic_off();
++        k_msleep(100);
++        play_haptic_milli(80);
++    }
++#endif
++}
++
+ #define BUTTON_PRESSED 1
+ #define BUTTON_RELEASED 0
+ 
+ #define TAP_THRESHOLD 300     // 300 ms for single tap
+ #define DOUBLE_TAP_WINDOW 600 // 600 ms maximum for double-tap
+-#define LONG_PRESS_TIME 3000  // 3000 ms for long press (power off)
++#define LONG_PRESS_TIME 1500  // 1.5 s hold powers off (stock 3000 ms); taps stay < 300 ms
+ 
+ typedef enum {
+     BUTTON_EVENT_NONE,
+@@ -220,7 +280,9 @@ void check_button_level(struct k_work *work_item)
+         LOG_INF("single tap detected\n");
+         btn_last_event = event;
+ 
++        toggle_recording();
+         notify_tap();
++        notify_recording_state();
+     }
+ 
+     // Double tap
+@@ -333,6 +395,9 @@ int button_init()
+ void activate_button_work()
+ {
+     k_work_schedule(&button_work, K_MSEC(BUTTON_CHECK_INTERVAL));
++    if (recording_enabled) {
++        k_work_schedule(&heartbeat_work, K_SECONDS(RECORDING_HEARTBEAT_S));
++    }
+ }
+ 
+ void register_button_service()
+@@ -353,6 +418,7 @@ void turnoff_all()
+     led_off();
+     // Set is_off immediately so set_led_state() keeps LEDs off
+     is_off = true;
++    k_work_cancel_delayable(&heartbeat_work);
+ 
+ #ifdef CONFIG_OMI_ENABLE_HAPTIC
+     play_haptic_milli(100);
+diff --git a/omi/firmware/omi/src/lib/core/mic.h b/omi/firmware/omi/src/lib/core/mic.h
+index 8e28996..081290e 100644
+--- a/omi/firmware/omi/src/lib/core/mic.h
++++ b/omi/firmware/omi/src/lib/core/mic.h
+@@ -26,4 +26,7 @@ void mic_set_gain(uint8_t gain_level);
+ /* True while the mic is in hardware AAD sleep (mic off, waiting for sound).
+  * Lets other subsystems (e.g. the status LED) drop to their lowest-power state. */
+ bool mic_in_aad_sleep(void);
++
++/* Tap-to-record: hold the mic in its lowest-power state while muted. */
++void mic_set_muted(bool muted);
+ #endif
+diff --git a/omi/firmware/omi/src/lib/core/transport.c b/omi/firmware/omi/src/lib/core/transport.c
+index 3196ce0..95da50b 100644
+--- a/omi/firmware/omi/src/lib/core/transport.c
++++ b/omi/firmware/omi/src/lib/core/transport.c
+@@ -1397,6 +1397,9 @@ int transport_start()
+     memset(storage_temp_data, 0, OPUS_PADDED_LENGTH * 4);
+     bt_gatt_service_register(&storage_service);
+ #endif
++    /* A 1-1.2 s advertising interval (BT_GAP_ADV_SLOW_INT_MIN/MAX) was tried here. It saves only
++     * ~1 % of the battery per day, and macOS then needed up to 45 s to discover the
++     * pendant (15 s scans missed it), so this stays on the stock 100-150 ms. */
+     err = bt_le_adv_start(BT_LE_ADV_CONN, bt_ad, ARRAY_SIZE(bt_ad), bt_sd, ARRAY_SIZE(bt_sd));
+     if (err) {
+         LOG_ERR("Transport advertising failed to start (err %d), continuing without BLE", err);
+diff --git a/omi/firmware/omi/src/main.c b/omi/firmware/omi/src/main.c
+index 9972114..f845a62 100644
+--- a/omi/firmware/omi/src/main.c
++++ b/omi/firmware/omi/src/main.c
+@@ -37,6 +37,35 @@ bool is_connected = false;
+ bool is_charging = false;
+ bool is_off = false;
+ bool blink_toggle = false;
++/* Tap-to-record: a short press flips this (lib/core/button.c).
++ * While false, mic_handler() drops PCM before the codec, so nothing is streamed
++ * over BLE or written to the SD ring. Starts false at boot (muted, purple LED):
++ * the first tap starts a note. */
++bool recording_enabled = false;
++
++/* The status LED flashes for LED_FLASH_MS once every LED_FLASH_EVERY_S
++ * seconds instead of staying lit, in the two states the pendant spends its battery in:
++ * recording while disconnected (red) and muted (purple). Connected (blue), charging and
++ * clock-unset keep their stock patterns. set_led_state() runs once a second from main(). */
++#define LED_FLASH_MS 100
++#define LED_FLASH_EVERY_S 3
++static uint8_t led_ticks_until_flash = 0;
++
++static void led_flash_off(struct k_work *work)
++{
++    set_led_red(false);
++    set_led_blue(false);
++}
++K_WORK_DELAYABLE_DEFINE(led_flash_off_work, led_flash_off);
++
++void set_led_state(void);
++
++/* Called by the button code when recording toggles: show the new colour now. */
++void led_state_changed(void)
++{
++    led_ticks_until_flash = 0;
++    set_led_state();
++}
+ 
+ static void print_reset_reason(void)
+ {
+@@ -77,6 +106,9 @@ static void codec_handler(uint8_t *data, size_t len)
+ 
+ static void mic_handler(int16_t *buffer)
+ {
++    if (!recording_enabled) {
++        return; /* muted by the button: drop PCM before the codec */
++    }
+ #ifdef CONFIG_OMI_ENABLE_MONITOR
+     // Track total bytes processed (each sample is 2 bytes)
+     monitor_inc_mic_buffer();
+@@ -161,13 +193,24 @@ void set_led_state()
+ #endif
+         {
+             green = blink_toggle;
+-            blue = !blink_toggle && is_connected;
+-            red = !blink_toggle && !is_connected;
++            /* Between green blinks: purple while muted, else blue/red as before. */
++            blue = !blink_toggle && (is_connected || !recording_enabled);
++            red = !blink_toggle && (!is_connected || !recording_enabled);
+             blink_toggle = !blink_toggle;
+         }
++    } else if (is_connected && recording_enabled) {
++        blue = true; /* connected: solid blue, as stock */
+     } else {
+-        blue = is_connected;
+-        red = !is_connected;
++        /* Muted: red + blue together (purple), a colour no stock state uses.
++         * Recording, disconnected: red, as stock. Both as a short flash every few seconds. */
++        if (led_ticks_until_flash == 0) {
++            blue = !recording_enabled;
++            red = true;
++            led_ticks_until_flash = LED_FLASH_EVERY_S - 1;
++            k_work_reschedule(&led_flash_off_work, K_MSEC(LED_FLASH_MS));
++        } else {
++            led_ticks_until_flash--;
++        }
+     }
+ 
+     set_led_green(green);
+@@ -346,6 +389,9 @@ int main(void)
+         return ret;
+     }
+     // Hardware AAD (T5838) is started inside mic_start().
++    if (!recording_enabled) {
++        mic_set_muted(true); /* boot muted: mic asleep until the first tap */
++    }
+ 
+     LOG_INF("Device initialized successfully\n");
+ 
+diff --git a/omi/firmware/omi/src/mic.c b/omi/firmware/omi/src/mic.c
+index 781754f..1508be0 100644
+--- a/omi/firmware/omi/src/mic.c
++++ b/omi/firmware/omi/src/mic.c
+@@ -83,6 +83,7 @@ static atomic_t aad_wake_pending = ATOMIC_INIT(0); /* WAKE edge seen by ISR */
+ static atomic_t aad_woke = ATOMIC_INIT(0);         /* tell mic ctx it just woke */
+ static atomic_t aad_in_sleep = ATOMIC_INIT(0);     /* mic is in hardware AAD sleep */
+ static atomic_t aad_req_sleep = ATOMIC_INIT(0);    /* silence timer asked to sleep */
++static atomic_t aad_muted = ATOMIC_INIT(0);        /* tap-to-record mute holds the mic in AAD sleep */
+ static int64_t aad_last_voice_ms;
+ 
+ static void aad_track_silence(const int16_t *buf, size_t n);
+@@ -381,6 +382,12 @@ static void enter_hw_aad(void)
+     atomic_set(&aad_in_sleep, 1);
+ 
+     atomic_clear(&aad_wake_pending);
++    if (atomic_get(&aad_muted)) {
++        /* Low-power mute: stay asleep, WAKE stays masked, until the
++         * button turns recording back on (mic_set_muted(false)). */
++        LOG_INF("AAD: hardware sleep (muted, WAKE ignored)");
++        return;
++    }
+     aad_wake_irq(true); /* arm: only real acoustic activity wakes now */
+ 
+     /* If WAKE is already HIGH at arm time (sound during entry) the edge would be
+@@ -421,13 +428,29 @@ static void aad_thread_fn(void *p1, void *p2, void *p3)
+         }
+ 
+         if (atomic_cas(&aad_wake_pending, 1, 0)) {
+-            if (atomic_get(&aad_in_sleep)) {
++            if (atomic_get(&aad_in_sleep) && !atomic_get(&aad_muted)) {
+                 exit_hw_aad();
+             }
+         }
+     }
+ }
+ 
++/* Low-power mute. Muted: mask WAKE and drop the mic into its
++ * hardware AAD sleep now (PDM off, SD rail off when nothing is connected) instead
++ * of capturing frames that mic_handler() would throw away. Unmuted: wake it; the
++ * normal silence timer takes over again. Non-blocking; the aad thread does the work. */
++void mic_set_muted(bool muted)
++{
++    atomic_set(&aad_muted, muted ? 1 : 0);
++    if (muted) {
++        aad_wake_irq(false);
++        atomic_set(&aad_req_sleep, 1);
++    } else {
++        atomic_set(&aad_wake_pending, 1);
++    }
++    k_sem_give(&aad_sem);
++}
++
+ /* Called per mic frame: track silence and request AAD sleep after a hold. */
+ static void aad_track_silence(const int16_t *buf, size_t n)
+ {
+@@ -495,6 +518,17 @@ static int aad_hw_start(void)
+ 
+ #endif /* CONFIG_OMI_ENABLE_T5838_AAD */
+ 
++#ifndef CONFIG_OMI_ENABLE_T5838_AAD
++void mic_set_muted(bool muted)
++{
++    if (muted) {
++        mic_pause();
++    } else {
++        mic_resume();
++    }
++}
++#endif
++
+ void mic_off()
+ {
+     if (mic_running) {

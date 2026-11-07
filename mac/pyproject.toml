@@ -1,0 +1,37 @@
+[project]
+name = "omi-voice-notes"
+version = "0.1.0"
+description = "Omi pendant on a Mac: download its stored audio and stream it live over Bluetooth, transcribe locally with whisper.cpp"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "bleak>=0.22",
+]
+
+[project.scripts]
+omi-scan = "omi_voice_notes.cli.scan:main"
+omi-sync = "omi_voice_notes.cli.sync:main"
+omi-stream = "omi_voice_notes.cli.stream:main"
+omi-transcribe = "omi_voice_notes.cli.transcribe:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["omi_voice_notes"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

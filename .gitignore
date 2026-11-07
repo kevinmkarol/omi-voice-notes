@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+mac/.venv/
+mac/logs/
+mac/*.egg-info/
+# firmware: upstream clone, downloaded release files, build outputs
+firmware/upstream/
+firmware/reference/
+firmware/out/
